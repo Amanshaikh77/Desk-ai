@@ -487,7 +487,7 @@ app.get('/logout', (req, res) => {
 
 app.get('/status', (req, res) => res.json({ code: currentCode, connected: isConnected }));
 
-app.listen(3000, () => {
+app.listen(process.env.PORT || 3000, () => {
     console.log('\n=================================================');
     console.log('🚀 DeskAI LIVE ON: http://localhost:3000');
     console.log('=================================================\n');
