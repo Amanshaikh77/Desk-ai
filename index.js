@@ -3,7 +3,8 @@ import cookieParser from 'cookie-parser';
 import baileysPkg, { 
     useMultiFileAuthState, 
     DisconnectReason,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    Browsers
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import fs from 'fs';
@@ -80,10 +81,12 @@ async function startBot(phoneNumber) {
             logger: pino({ level: 'silent' }),
             auth: state,
             printQRInTerminal: false,
-            browser: ["Ubuntu", "Chrome", "20.0.04"],
+            // Official macOS Safari browser identification to pass handshake
+            browser: Browsers.macOS('Desktop'),
+            syncFullHistory: false,
+            markOnlineOnConnect: true,
             connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 60000,
-            keepAliveIntervalMs: 10000
+            defaultQueryTimeoutMs: 60000
         });
 
         if (!botSocket.authState.creds.registered && phoneNumber) {
@@ -97,7 +100,7 @@ async function startBot(phoneNumber) {
                     console.log('Pairing error:', err.message);
                     pairingError = err.message || 'Error generating code. Please retry.';
                 }
-            }, 4000);
+            }, 3000);
         }
 
         botSocket.ev.on('connection.update', (update) => {
@@ -112,7 +115,7 @@ async function startBot(phoneNumber) {
                 isConnected = true;
                 currentCode = null;
                 pairingError = null;
-                console.log('WhatsApp Bot Online!');
+                console.log('WhatsApp Bot Linked & Active!');
             }
         });
 
@@ -351,7 +354,7 @@ app.get('/dashboard', requireAuth, (req, res) => {
 
                 const codeArea = document.getElementById('codeArea');
                 const genBtn = document.getElementById('genBtn');
-                codeArea.innerHTML = '<div style="color:#38bdf8; font-size:12px; margin-top:8px;">Connecting to WhatsApp servers... (takes 5-8 sec)</div>';
+                codeArea.innerHTML = '<div style="color:#38bdf8; font-size:12px; margin-top:8px;">Requesting fresh pairing code...</div>';
                 genBtn.disabled = true;
 
                 await fetch('/save-config', {
@@ -381,7 +384,7 @@ app.get('/dashboard', requireAuth, (req, res) => {
                         genBtn.disabled = false;
                         codeArea.innerHTML = \`
                             <div class="error-card">
-                                <b>WhatsApp Error:</b> \${data.error}<br>
+                                <b>Error:</b> \${data.error}<br>
                                 <button class="btn-outline" style="margin-top:6px;" onclick="saveAndPair()">Try Again</button>
                             </div>\`;
                     }
@@ -449,7 +452,7 @@ app.post('/save-config', async (req, res) => {
             try { botSocket.ev.removeAllListeners(); botSocket.end(undefined); } catch(e){}
             botSocket = null;
         }
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 1200));
         if (fs.existsSync('auth_session')) {
             try { fs.rmSync('auth_session', { recursive: true, force: true }); } catch (e) {}
         }
@@ -471,6 +474,6 @@ app.get('/status', (req, res) => res.json({
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server started successfully on port ${PORT}`);
+    console.log(`Server started on port ${PORT}`);
     if (shopConfig && shopConfig.phone) startBot(shopConfig.phone);
 });
