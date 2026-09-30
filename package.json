@@ -1,0 +1,16 @@
+{
+  "name": "deskai-whatsapp-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "axios": "^1.7.9",
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "pino": "^9.6.0"
+  }
+}
