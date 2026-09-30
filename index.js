@@ -1,6 +1,6 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
-import makeWASocket, { 
+import baileysPkg, { 
     useMultiFileAuthState, 
     DisconnectReason,
     fetchLatestBaileysVersion
@@ -8,6 +8,8 @@ import makeWASocket, {
 import pino from 'pino';
 import fs from 'fs';
 import axios from 'axios';
+
+const makeWASocket = baileysPkg.default || baileysPkg;
 
 const app = express();
 app.use(express.json());
@@ -52,7 +54,7 @@ async function askAI(userQuery, config) {
     const sName = config.shopName || "Tech Solutions Cafe";
     const sAddr = config.address || "hamare kendra par";
     const sTime = config.timing || "8:00 AM se 8:00 PM";
-    const sServ = config.services || "sabhi digital dastawez seva";
+    const sServ = config.services || "sabhi sevaayein";
 
     const prompt = `You are front-desk assistant for "${sName}". Store Address: ${sAddr}. Timings: ${sTime}. Services: ${sServ}. Answer politely in Hindi/Hinglish. List required documents. Direct them to visit. No robot emojis. Query: ${userQuery}`;
 
@@ -222,7 +224,7 @@ app.get('/', (req, res) => {
         </section>
         <div class="demo-box">
             <div class="demo-header"><span>WhatsApp Live Preview (Sample)</span><span style="color:#25d366;">● Active</span></div>
-            <div class="bubble user-bubble">Bhaiya, Zameen ka Kewala nikalwana hai, kya-kya lagega?</div>
+            <div class="bubble user-bubble">Bhaiya, Zameen ka Kewala (Registry) nikalwana hai, kya lagega?</div>
             <div class="bubble bot-bubble"><b>Support:</b> Namaste! Mauja, Thana aur Khata number lekar dukaan par aayein. Turant certified copy mil jayegi.</div>
         </div>
         <footer>DeskAI Platform © 2026.</footer>
