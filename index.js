@@ -4,7 +4,8 @@ import baileysPkg, {
     useMultiFileAuthState, 
     DisconnectReason,
     fetchLatestBaileysVersion,
-    Browsers
+    makeCacheableSignalKeyStore,
+    delay
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import fs from 'fs';
@@ -76,46 +77,57 @@ async function startBot(phoneNumber) {
         const { state, saveCreds } = await useMultiFileAuthState('auth_session');
         const { version } = await fetchLatestBaileysVersion();
 
+        const logger = pino({ level: 'silent' });
+
         botSocket = makeWASocket({
             version,
-            logger: pino({ level: 'silent' }),
-            auth: state,
+            logger,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, logger),
+            },
             printQRInTerminal: false,
-            // Official macOS Safari browser identification to pass handshake
-            browser: Browsers.macOS('Desktop'),
-            syncFullHistory: false,
-            markOnlineOnConnect: true,
-            connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 60000
+            // Chrome Linux signature that WhatsApp pairing server expects
+            browser: ['Chrome (Linux)', '', ''],
+            markOnlineOnConnect: false,
+            generateHighQualityLinkPreview: true,
+            syncFullHistory: false
         });
 
+        // Request pairing code only when socket credentials are not registered
         if (!botSocket.authState.creds.registered && phoneNumber) {
-            setTimeout(async () => {
-                try {
-                    let code = await botSocket.requestPairingCode(phoneNumber);
-                    currentCode = code?.match(/.{1,4}/g)?.join('-') || code;
-                    pairingError = null;
-                    console.log(`PAIRING CODE: ${currentCode}`);
-                } catch (err) {
-                    console.log('Pairing error:', err.message);
-                    pairingError = err.message || 'Error generating code. Please retry.';
-                }
-            }, 3000);
+            // Safe delay for cloud handshake setup
+            await delay(4000);
+            try {
+                let code = await botSocket.requestPairingCode(phoneNumber);
+                currentCode = code?.match(/.{1,4}/g)?.join('-') || code;
+                pairingError = null;
+                console.log(`\n========================================`);
+                console.log(`>>> WHATSAPP PAIRING CODE: ${currentCode} <<<`);
+                console.log(`========================================\n`);
+            } catch (err) {
+                console.log('Pairing code error:', err);
+                pairingError = err.message || 'WhatsApp rejected pairing code request.';
+            }
         }
 
-        botSocket.ev.on('connection.update', (update) => {
+        botSocket.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect } = update;
             if (connection === 'close') {
                 isConnected = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 if (statusCode !== DisconnectReason.loggedOut) {
-                    setTimeout(() => startBot(phoneNumber), 3000);
+                    await delay(3000);
+                    startBot(phoneNumber);
+                } else {
+                    console.log('Logged out or pairing failed. Cleaning session.');
+                    try { fs.rmSync('auth_session', { recursive: true, force: true }); } catch (e) {}
                 }
             } else if (connection === 'open') {
                 isConnected = true;
                 currentCode = null;
                 pairingError = null;
-                console.log('WhatsApp Bot Linked & Active!');
+                console.log('\n✅ WHATSAPP CONNECTED & ACTIVE!\n');
             }
         });
 
@@ -126,7 +138,7 @@ async function startBot(phoneNumber) {
 
             for (const msg of messages) {
                 const sender = msg.key.remoteJid;
-                if (sender.endsWith('@g.us')) continue;
+                if (sender.endsWith('@g.us') || msg.key.fromMe) continue;
 
                 const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
                 if (!text || text.startsWith('*[Store Support]*')) continue;
@@ -354,7 +366,7 @@ app.get('/dashboard', requireAuth, (req, res) => {
 
                 const codeArea = document.getElementById('codeArea');
                 const genBtn = document.getElementById('genBtn');
-                codeArea.innerHTML = '<div style="color:#38bdf8; font-size:12px; margin-top:8px;">Requesting fresh pairing code...</div>';
+                codeArea.innerHTML = '<div style="color:#38bdf8; font-size:12px; margin-top:8px;">Requesting official pairing code... (5-7 sec)</div>';
                 genBtn.disabled = true;
 
                 await fetch('/save-config', {
@@ -452,7 +464,7 @@ app.post('/save-config', async (req, res) => {
             try { botSocket.ev.removeAllListeners(); botSocket.end(undefined); } catch(e){}
             botSocket = null;
         }
-        await new Promise(r => setTimeout(r, 1200));
+        await delay(1200);
         if (fs.existsSync('auth_session')) {
             try { fs.rmSync('auth_session', { recursive: true, force: true }); } catch (e) {}
         }
