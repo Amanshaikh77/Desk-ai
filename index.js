@@ -21,6 +21,10 @@ let botSocket = null;
 let isConnected = false;
 let pairingError = null;
 
+function ensureDir(dir) {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
 function loadConfig() {
     if (fs.existsSync(CONFIG_FILE)) {
         try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')); } catch (e) { return null; }
@@ -50,17 +54,7 @@ async function askAI(userQuery, config) {
     const sTime = config.timing || "8:00 AM se 8:00 PM";
     const sServ = config.services || "sabhi digital dastawez seva";
 
-    const prompt = `You are front-desk assistant for "${sName}".
-Store Address: ${sAddr}
-Store Timings: ${sTime}
-Services: ${sServ}
-
-Instructions:
-1. Answer politely in Hindi or Hinglish.
-2. If asking about services, list exact original documents required.
-3. Instruct them to visit store at "${sAddr}" during "${sTime}".
-4. Do not use robot emojis.
-Customer query: ${userQuery}`;
+    const prompt = `You are front-desk assistant for "${sName}". Store Address: ${sAddr}. Timings: ${sTime}. Services: ${sServ}. Answer politely in Hindi/Hinglish. List required documents. Direct them to visit. No robot emojis. Query: ${userQuery}`;
 
     try {
         const res = await axios.get(`https://text.pollinations.ai/${encodeURIComponent(prompt)}`, { timeout: 20000 });
@@ -73,91 +67,84 @@ Customer query: ${userQuery}`;
 async function startBot(phoneNumber) {
     currentCode = null;
     pairingError = null;
+    ensureDir('auth_session');
 
-    if (botSocket) {
-        try {
-            botSocket.ev.removeAllListeners();
-            botSocket.end(undefined);
-        } catch (e) {}
-        botSocket = null;
-    }
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('auth_session');
+        const { version } = await fetchLatestBaileysVersion();
 
-    const { state, saveCreds } = await useMultiFileAuthState('auth_session');
-    const { version } = await fetchLatestBaileysVersion();
+        botSocket = makeWASocket({
+            version,
+            logger: pino({ level: 'silent' }),
+            auth: state,
+            printQRInTerminal: false,
+            browser: ["Ubuntu", "Chrome", "20.0.04"],
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 10000
+        });
 
-    botSocket = makeWASocket({
-        version,
-        logger: pino({ level: 'silent' }),
-        auth: state,
-        printQRInTerminal: false,
-        browser: ["Chrome (Linux)", "Chrome", "122.0.0.0"],
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 60000
-    });
+        if (!botSocket.authState.creds.registered && phoneNumber) {
+            setTimeout(async () => {
+                try {
+                    let code = await botSocket.requestPairingCode(phoneNumber);
+                    currentCode = code?.match(/.{1,4}/g)?.join('-') || code;
+                    pairingError = null;
+                    console.log(`PAIRING CODE: ${currentCode}`);
+                } catch (err) {
+                    console.log('Pairing error:', err.message);
+                    pairingError = err.message || 'Error generating code. Please retry.';
+                }
+            }, 4000);
+        }
 
-    if (!botSocket.authState.creds.registered && phoneNumber) {
-        setTimeout(async () => {
-            try {
-                let code = await botSocket.requestPairingCode(phoneNumber);
-                currentCode = code?.match(/.{1,4}/g)?.join('-') || code;
+        botSocket.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect } = update;
+            if (connection === 'close') {
+                isConnected = false;
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                if (statusCode !== DisconnectReason.loggedOut) {
+                    setTimeout(() => startBot(phoneNumber), 3000);
+                }
+            } else if (connection === 'open') {
+                isConnected = true;
+                currentCode = null;
                 pairingError = null;
-                console.log(`\n=============================`);
-                console.log(`PAIRING CODE: ${currentCode}`);
-                console.log(`=============================\n`);
-            } catch (err) {
-                console.log('Pairing Code Error:', err.message);
-                pairingError = err.message || 'WhatsApp ne pairing code reject kar diya. Dobara try karein.';
+                console.log('WhatsApp Bot Online!');
             }
-        }, 5000);
+        });
+
+        botSocket.ev.on('creds.update', saveCreds);
+
+        botSocket.ev.on('messages.upsert', async ({ messages, type }) => {
+            if (type !== 'notify' || !shopConfig) return;
+
+            for (const msg of messages) {
+                const sender = msg.key.remoteJid;
+                if (sender.endsWith('@g.us')) continue;
+
+                const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
+                if (!text || text.startsWith('*[Store Support]*')) continue;
+
+                const aiReply = await askAI(text, shopConfig);
+                const finalMsg = `*[Store Support]*\n\n${aiReply}\n\n📍 *पता:* ${shopConfig.address || 'Kendra'}\n⏰ *समय:* ${shopConfig.timing || '8:00 AM - 8:00 PM'}`;
+
+                await botSocket.sendMessage(sender, { text: finalMsg });
+
+                saveChat({
+                    id: Date.now(),
+                    customer: '+' + sender.replace('@s.whatsapp.net', ''),
+                    query: text,
+                    reply: aiReply,
+                    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    date: new Date().toLocaleDateString()
+                });
+            }
+        });
+    } catch (e) {
+        console.error('Socket init error:', e.message);
+        pairingError = e.message;
     }
-
-    botSocket.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'close') {
-            isConnected = false;
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) {
-                startBot(phoneNumber);
-            }
-        } else if (connection === 'open') {
-            isConnected = true;
-            currentCode = null;
-            pairingError = null;
-            console.log('✅ WhatsApp Connected Successfully!');
-        }
-    });
-
-    botSocket.ev.on('creds.update', saveCreds);
-
-    botSocket.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify' || !shopConfig) return;
-
-        for (const msg of messages) {
-            const sender = msg.key.remoteJid;
-            if (sender.endsWith('@g.us')) continue;
-
-            const text = (msg.message?.conversation || 
-                          msg.message?.extendedTextMessage?.text || '').trim();
-
-            if (!text || text.startsWith('*[Store Support]*')) continue;
-
-            const aiReply = await askAI(text, shopConfig);
-            const finalMsg = `*[Store Support]*\n\n${aiReply}\n\n📍 *पता:* ${shopConfig.address || 'Kendra'}\n⏰ *समय:* ${shopConfig.timing || '8:00 AM - 8:00 PM'}`;
-
-            await botSocket.sendMessage(sender, { text: finalMsg });
-
-            const rawNumber = sender.replace('@s.whatsapp.net', '');
-            saveChat({
-                id: Date.now(),
-                customer: '+' + rawNumber,
-                query: text,
-                reply: aiReply,
-                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                date: new Date().toLocaleDateString()
-            });
-        }
-    });
 }
 
 function requireAuth(req, res, next) {
@@ -217,9 +204,7 @@ app.get('/', (req, res) => {
         <section class="hero">
             <div class="tag">⚡ AI-Powered Front-Desk Executive</div>
             <h1>Automate WhatsApp Inquiries into <span>Store Walk-Ins</span></h1>
-            <p class="hero-desc">
-                DeskAI links directly with your official WhatsApp. It answers customer queries 24/7, gives required original document checklists, and brings footfall to your physical counter.
-            </p>
+            <p class="hero-desc">DeskAI links directly with your official WhatsApp. It answers customer queries 24/7, gives required original document checklists, and brings footfall to your physical counter.</p>
             <div class="feature-badges">
                 <span class="f-badge">⚡ 10-Second Pairing</span>
                 <span class="f-badge">📋 Document Checklists</span>
@@ -237,7 +222,7 @@ app.get('/', (req, res) => {
         </section>
         <div class="demo-box">
             <div class="demo-header"><span>WhatsApp Live Preview (Sample)</span><span style="color:#25d366;">● Active</span></div>
-            <div class="bubble user-bubble">Bhaiya, Zameen ka Kewala (Registry) nikalwana hai, kya lagega?</div>
+            <div class="bubble user-bubble">Bhaiya, Zameen ka Kewala nikalwana hai, kya-kya lagega?</div>
             <div class="bubble bot-bubble"><b>Support:</b> Namaste! Mauja, Thana aur Khata number lekar dukaan par aayein. Turant certified copy mil jayegi.</div>
         </div>
         <footer>DeskAI Platform © 2026.</footer>
@@ -257,4 +242,233 @@ app.get('/', (req, res) => {
     </body>
     </html>
     `);
+});
+app.get('/dashboard', requireAuth, (req, res) => {
+    const config = shopConfig || { shopName: '', address: '', timing: '', services: '', phone: '' };
+    let cleanPhone = (config.phone || '').replace(/^91/, '');
+
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>DeskAI - Private Live Chat Dashboard</title>
+        <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+            body { background: #070b13; color: #f1f5f9; min-height: 100vh; padding-bottom: 40px; }
+            nav { display: flex; justify-content: space-between; align-items: center; padding: 16px 6%; background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(14px); border-bottom: 1px solid rgba(255, 255, 255, 0.08); position: sticky; top: 0; z-index: 100; }
+            .logo { font-size: 20px; font-weight: 800; background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-decoration: none; }
+            .btn-action { background: linear-gradient(135deg, #2563eb, #4f46e5); color: white; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; text-decoration: none; }
+            .btn-outline { background: transparent; border: 1px solid rgba(255,255,255,0.2); color: #cbd5e1; padding: 7px 12px; border-radius: 8px; font-size: 12px; cursor: pointer; text-decoration: none; }
+            .container { max-width: 680px; margin: 20px auto; padding: 0 15px; }
+            .top-bar { margin-bottom: 14px; }
+            .btn-back { display: inline-flex; align-items: center; gap: 6px; background: #101726; border: 1px solid rgba(255,255,255,0.15); color: #38bdf8; padding: 8px 16px; border-radius: 10px; font-size: 13px; font-weight: 600; text-decoration: none; }
+            .header-card { background: #101726; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 18px; margin-bottom: 18px; display: flex; justify-content: space-between; align-items: center; }
+            .badge { font-size: 11px; padding: 4px 10px; border-radius: 12px; font-weight: 600; }
+            .connected { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+            .disconnected { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+            .chat-item { background: #0b141a; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+            .chat-meta { display: flex; justify-content: space-between; font-size: 11px; color: #94a3b8; margin-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 5px; }
+            .cust-label { color: #38bdf8; font-weight: bold; }
+            .bubble { max-width: 88%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.4; margin-bottom: 6px; }
+            .user-bubble { background: #005c4b; color: #e9edef; margin-left: auto; border-bottom-right-radius: 2px; }
+            .ai-bubble { background: #202c33; color: #d1d7db; border-bottom-left-radius: 2px; }
+            .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.75); justify-content: center; align-items: center; z-index: 1000; padding: 15px; }
+            .modal-box { background: #101726; border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; width: 100%; max-width: 460px; padding: 25px; max-height: 90vh; overflow-y: auto; }
+            input, textarea { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #24344d; background: #070b13; color: white; font-size: 13px; margin: 4px 0 12px; }
+            .phone-group { display: flex; align-items: center; margin: 4px 0 12px; }
+            .phone-prefix { background: #1e293b; border: 1px solid #24344d; border-right: none; color: #38bdf8; font-weight: 700; font-size: 13px; padding: 9px 12px; border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+            .phone-input { border-top-left-radius: 0; border-bottom-left-radius: 0; margin: 0 !important; }
+            .code-card { background: #032b21; border: 1px dashed #10b981; padding: 12px; border-radius: 8px; margin: 12px 0; text-align: center; }
+            .error-card { background: #3b0d0c; border: 1px dashed #ef4444; color: #fca5a5; padding: 12px; border-radius: 8px; margin: 12px 0; font-size: 12px; }
+        </style>
+    </head>
+    <body>
+        <nav>
+            <a href="/" class="logo">DeskAI</a>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <button class="btn-action" onclick="openWizard()">⚙️ Shop Settings</button>
+                <a href="/logout" class="btn-outline">Logout</a>
+            </div>
+        </nav>
+
+        <div class="container">
+            <div class="top-bar"><a href="/" class="btn-back">← Back to Home</a></div>
+            <div class="header-card">
+                <div>
+                    <h3 style="font-size:16px;">Private Chat History</h3>
+                    <div style="font-size:12px; color:#94a3b8; margin-top:2px;">Logged in: <b>${req.cookies.user}</b></div>
+                </div>
+                <span id="connBadge" class="badge ${isConnected ? 'connected' : 'disconnected'}">● ${isConnected ? 'Bot Online' : 'Bot Offline'}</span>
+            </div>
+            <div id="realChatList"><div style="text-align:center; padding:40px; color:#64748b;">Loading private chat history...</div></div>
+        </div>
+
+        <div id="wizardModal" class="modal">
+            <div class="modal-box">
+                <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+                    <h3 style="font-size:15px;">Shop Configuration</h3>
+                    <span onclick="closeWizard()" style="cursor:pointer; font-size:18px; color:#94a3b8;">&times;</span>
+                </div>
+                <label style="font-size:12px; color:#cbd5e1;">Shop Name:</label>
+                <input type="text" id="shopName" value="${config.shopName || ''}">
+                <label style="font-size:12px; color:#cbd5e1;">Address:</label>
+                <textarea id="address" rows="2">${config.address || ''}</textarea>
+                <label style="font-size:12px; color:#cbd5e1;">Timings:</label>
+                <input type="text" id="timing" value="${config.timing || ''}">
+                <label style="font-size:12px; color:#cbd5e1;">Services:</label>
+                <textarea id="services" rows="2">${config.services || ''}</textarea>
+                <label style="font-size:12px; color:#cbd5e1;">WhatsApp Number (10 Digits):</label>
+                <div class="phone-group">
+                    <span class="phone-prefix">+91</span>
+                    <input type="tel" id="phone" class="phone-input" maxlength="10" value="${cleanPhone}">
+                </div>
+                <button class="btn-action" id="genBtn" style="width:100%; margin-top:5px;" onclick="saveAndPair()">Save & Generate Pairing Code</button>
+                <div id="codeArea"></div>
+            </div>
+        </div>
+
+        <script>
+            function openWizard() { document.getElementById('wizardModal').style.display = 'flex'; }
+            function closeWizard() { document.getElementById('wizardModal').style.display = 'none'; }
+
+            let poll = null;
+            async function saveAndPair() {
+                if (poll) clearInterval(poll);
+                let rawPhone = document.getElementById('phone').value.replace(/[^0-9]/g, '');
+                if (!rawPhone || rawPhone.length < 10) {
+                    alert('Please enter a valid 10-digit number');
+                    return;
+                }
+                const phone = '91' + rawPhone.slice(-10);
+                const shopName = document.getElementById('shopName').value;
+                const address = document.getElementById('address').value;
+                const timing = document.getElementById('timing').value;
+                const services = document.getElementById('services').value;
+
+                const codeArea = document.getElementById('codeArea');
+                const genBtn = document.getElementById('genBtn');
+                codeArea.innerHTML = '<div style="color:#38bdf8; font-size:12px; margin-top:8px;">Connecting to WhatsApp servers... (takes 5-8 sec)</div>';
+                genBtn.disabled = true;
+
+                await fetch('/save-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone, shopName, address, timing, services })
+                });
+
+                poll = setInterval(async () => {
+                    const res = await fetch('/status');
+                    const data = await res.json();
+                    if (data.code) {
+                        clearInterval(poll);
+                        genBtn.disabled = false;
+                        codeArea.innerHTML = \`
+                            <div class="code-card">
+                                <div style="font-size:11px; color:#cbd5e1;">Your WhatsApp Pairing Code:</div>
+                                <h2 style="color:#34d399; font-size:24px; letter-spacing:2px; margin:4px 0;">\${data.code}</h2>
+                                <small style="color:#94a3b8; font-size:10px;">WhatsApp > Linked Devices > Link with phone number</small>
+                            </div>\`;
+                    } else if (data.connected) {
+                        clearInterval(poll);
+                        genBtn.disabled = false;
+                        codeArea.innerHTML = '<div style="color:#34d399; margin-top:8px; font-weight:bold;">✅ WhatsApp Connected!</div>';
+                    } else if (data.error) {
+                        clearInterval(poll);
+                        genBtn.disabled = false;
+                        codeArea.innerHTML = \`
+                            <div class="error-card">
+                                <b>WhatsApp Error:</b> \${data.error}<br>
+                                <button class="btn-outline" style="margin-top:6px;" onclick="saveAndPair()">Try Again</button>
+                            </div>\`;
+                    }
+                }, 2000);
+            }
+
+            async function fetchRealChats() {
+                try {
+                    const [chatRes, statusRes] = await Promise.all([fetch('/api/chats'), fetch('/status')]);
+                    const chats = await chatRes.json();
+                    const status = await statusRes.json();
+                    const badge = document.getElementById('connBadge');
+                    if (status.connected) {
+                        badge.className = 'badge connected';
+                        badge.innerHTML = '● Bot Online';
+                    } else {
+                        badge.className = 'badge disconnected';
+                        badge.innerHTML = '● Bot Offline';
+                    }
+                    const list = document.getElementById('realChatList');
+                    if (!chats || chats.length === 0) {
+                        list.innerHTML = '<div style="text-align:center; padding:40px; color:#64748b;">No WhatsApp customer chats yet.</div>';
+                        return;
+                    }
+                    list.innerHTML = chats.map(c => \`
+                        <div class="chat-item">
+                            <div class="chat-meta"><span class="cust-label">👤 \${c.customer}</span><span>\${c.date} • \${c.time}</span></div>
+                            <div class="bubble user-bubble">\${c.query}</div>
+                            <div class="bubble ai-bubble">\${c.reply.replace(/\\n/g, '<br>')}</div>
+                        </div>
+                    \`).join('');
+                } catch (e) {}
+            }
+
+            setInterval(fetchRealChats, 2500);
+            fetchRealChats();
+        </script>
+    </body>
+    </html>
+    `);
+});
+
+app.post('/auth/google-callback', (req, res) => {
+    const { email } = req.body;
+    if (email) {
+        res.cookie('user', email, { httpOnly: true });
+        res.json({ success: true });
+    } else {
+        res.status(400).json({ error: 'No email' });
+    }
+});
+
+app.post('/save-config', async (req, res) => {
+    shopConfig = {
+        phone: (req.body.phone || '').replace(/[^0-9]/g, ''),
+        shopName: req.body.shopName || '',
+        address: req.body.address || '',
+        timing: req.body.timing || '',
+        services: req.body.services || ''
+    };
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(shopConfig, null, 2));
+
+    if (shopConfig.phone) {
+        if (botSocket) {
+            try { botSocket.ev.removeAllListeners(); botSocket.end(undefined); } catch(e){}
+            botSocket = null;
+        }
+        await new Promise(r => setTimeout(r, 1000));
+        if (fs.existsSync('auth_session')) {
+            try { fs.rmSync('auth_session', { recursive: true, force: true }); } catch (e) {}
+        }
+        startBot(shopConfig.phone);
+    }
+    res.json({ success: true });
+});
+
+app.get('/logout', (req, res) => {
+    res.clearCookie('user');
+    res.redirect('/');
+});
+
+app.get('/status', (req, res) => res.json({ 
+    code: currentCode, 
+    connected: isConnected,
+    error: pairingError
+}));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server started successfully on port ${PORT}`);
+    if (shopConfig && shopConfig.phone) startBot(shopConfig.phone);
 });
