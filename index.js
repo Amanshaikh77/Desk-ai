@@ -10,6 +10,7 @@ import baileysPkg, {
 import pino from 'pino';
 import fs from 'fs';
 import axios from 'axios';
+import QRCode from 'qrcode';
 
 const makeWASocket = baileysPkg.default || baileysPkg;
 
@@ -21,6 +22,7 @@ app.use(cookieParser());
 const CONFIG_FILE = 'profile.json';
 const CHATS_FILE = 'chats.json';
 let currentCode = null;
+let currentQR = null;
 let botSocket = null;
 let isConnected = false;
 let pairingError = null;
@@ -58,7 +60,7 @@ async function askAI(userQuery, config) {
     const sTime = config.timing || "8:00 AM se 8:00 PM";
     const sServ = config.services || "sabhi sevaayein";
 
-    const prompt = `You are front-desk assistant for "${sName}". Store Address: ${sAddr}. Timings: ${sTime}. Services: ${sServ}. Answer politely in Hindi/Hinglish. List required documents. Direct them to visit. No robot emojis. Query: ${userQuery}`;
+    const prompt = `You are front-desk assistant for "${sName}". Address: ${sAddr}. Timings: ${sTime}. Services: ${sServ}. Answer politely in Hindi/Hinglish. List required documents. Direct them to visit. No robot emojis. Query: ${userQuery}`;
 
     try {
         const res = await axios.get(`https://text.pollinations.ai/${encodeURIComponent(prompt)}`, { timeout: 20000 });
@@ -70,13 +72,13 @@ async function askAI(userQuery, config) {
 
 async function startBot(phoneNumber) {
     currentCode = null;
+    currentQR = null;
     pairingError = null;
     ensureDir('auth_session');
 
     try {
         const { state, saveCreds } = await useMultiFileAuthState('auth_session');
         const { version } = await fetchLatestBaileysVersion();
-
         const logger = pino({ level: 'silent' });
 
         botSocket = makeWASocket({
@@ -87,32 +89,35 @@ async function startBot(phoneNumber) {
                 keys: makeCacheableSignalKeyStore(state.keys, logger),
             },
             printQRInTerminal: false,
-            // Chrome Linux signature that WhatsApp pairing server expects
-            browser: ['Chrome (Linux)', '', ''],
+            // Native WhatsApp Web desktop identification
+            browser: ["Mac OS", "Chrome", "125.0.6422.142"],
             markOnlineOnConnect: false,
-            generateHighQualityLinkPreview: true,
             syncFullHistory: false
         });
 
-        // Request pairing code only when socket credentials are not registered
+        // Agar phone number provide hua aur un-registered hai toh pairing code mangayein
         if (!botSocket.authState.creds.registered && phoneNumber) {
-            // Safe delay for cloud handshake setup
-            await delay(4000);
+            await delay(4500);
             try {
                 let code = await botSocket.requestPairingCode(phoneNumber);
                 currentCode = code?.match(/.{1,4}/g)?.join('-') || code;
                 pairingError = null;
-                console.log(`\n========================================`);
-                console.log(`>>> WHATSAPP PAIRING CODE: ${currentCode} <<<`);
-                console.log(`========================================\n`);
+                console.log(`PAIRING CODE: ${currentCode}`);
             } catch (err) {
-                console.log('Pairing code error:', err);
-                pairingError = err.message || 'WhatsApp rejected pairing code request.';
+                console.log('Pairing error:', err.message);
+                pairingError = err.message || 'Error generating code.';
             }
         }
 
         botSocket.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                try {
+                    currentQR = await QRCode.toDataURL(qr);
+                } catch (e) {}
+            }
+
             if (connection === 'close') {
                 isConnected = false;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -120,14 +125,14 @@ async function startBot(phoneNumber) {
                     await delay(3000);
                     startBot(phoneNumber);
                 } else {
-                    console.log('Logged out or pairing failed. Cleaning session.');
                     try { fs.rmSync('auth_session', { recursive: true, force: true }); } catch (e) {}
                 }
             } else if (connection === 'open') {
                 isConnected = true;
                 currentCode = null;
+                currentQR = null;
                 pairingError = null;
-                console.log('\n✅ WHATSAPP CONNECTED & ACTIVE!\n');
+                console.log('✅ WhatsApp Linked & Online!');
             }
         });
 
@@ -223,7 +228,7 @@ app.get('/', (req, res) => {
             <h1>Automate WhatsApp Inquiries into <span>Store Walk-Ins</span></h1>
             <p class="hero-desc">DeskAI links directly with your official WhatsApp. It answers customer queries 24/7, gives required original document checklists, and brings footfall to your physical counter.</p>
             <div class="feature-badges">
-                <span class="f-badge">⚡ 10-Second Pairing</span>
+                <span class="f-badge">⚡ Instant Pairing</span>
                 <span class="f-badge">📋 Document Checklists</span>
                 <span class="f-badge">📍 Footfall Focused</span>
             </div>
@@ -297,8 +302,9 @@ app.get('/dashboard', requireAuth, (req, res) => {
             .phone-group { display: flex; align-items: center; margin: 4px 0 12px; }
             .phone-prefix { background: #1e293b; border: 1px solid #24344d; border-right: none; color: #38bdf8; font-weight: 700; font-size: 13px; padding: 9px 12px; border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
             .phone-input { border-top-left-radius: 0; border-bottom-left-radius: 0; margin: 0 !important; }
-            .code-card { background: #032b21; border: 1px dashed #10b981; padding: 12px; border-radius: 8px; margin: 12px 0; text-align: center; }
+            .code-card { background: #032b21; border: 1px dashed #10b981; padding: 14px; border-radius: 8px; margin: 12px 0; text-align: center; }
             .error-card { background: #3b0d0c; border: 1px dashed #ef4444; color: #fca5a5; padding: 12px; border-radius: 8px; margin: 12px 0; font-size: 12px; }
+            .qr-image { width: 180px; height: 180px; border-radius: 10px; background: white; padding: 6px; margin: 10px auto; display: block; }
         </style>
     </head>
     <body>
@@ -341,7 +347,11 @@ app.get('/dashboard', requireAuth, (req, res) => {
                     <span class="phone-prefix">+91</span>
                     <input type="tel" id="phone" class="phone-input" maxlength="10" value="${cleanPhone}">
                 </div>
-                <button class="btn-action" id="genBtn" style="width:100%; margin-top:5px;" onclick="saveAndPair()">Save & Generate Pairing Code</button>
+
+                <div style="display:flex; gap:8px; margin-top:5px;">
+                    <button class="btn-action" id="genBtn" style="flex:1;" onclick="saveAndPair()">Generate 8-Digit Code</button>
+                    <button class="btn-outline" id="qrBtn" style="flex:1;" onclick="saveAndShowQR()">Scan QR Instead</button>
+                </div>
                 <div id="codeArea"></div>
             </div>
         </div>
@@ -365,14 +375,12 @@ app.get('/dashboard', requireAuth, (req, res) => {
                 const services = document.getElementById('services').value;
 
                 const codeArea = document.getElementById('codeArea');
-                const genBtn = document.getElementById('genBtn');
-                codeArea.innerHTML = '<div style="color:#38bdf8; font-size:12px; margin-top:8px;">Requesting official pairing code... (5-7 sec)</div>';
-                genBtn.disabled = true;
+                codeArea.innerHTML = '<div style="color:#38bdf8; font-size:12px; margin-top:8px;">Requesting pairing code... (5 sec)</div>';
 
                 await fetch('/save-config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ phone, shopName, address, timing, services })
+                    body: JSON.stringify({ phone, shopName, address, timing, services, mode: 'code' })
                 });
 
                 poll = setInterval(async () => {
@@ -380,7 +388,6 @@ app.get('/dashboard', requireAuth, (req, res) => {
                     const data = await res.json();
                     if (data.code) {
                         clearInterval(poll);
-                        genBtn.disabled = false;
                         codeArea.innerHTML = \`
                             <div class="code-card">
                                 <div style="font-size:11px; color:#cbd5e1;">Your WhatsApp Pairing Code:</div>
@@ -389,16 +396,40 @@ app.get('/dashboard', requireAuth, (req, res) => {
                             </div>\`;
                     } else if (data.connected) {
                         clearInterval(poll);
-                        genBtn.disabled = false;
                         codeArea.innerHTML = '<div style="color:#34d399; margin-top:8px; font-weight:bold;">✅ WhatsApp Connected!</div>';
-                    } else if (data.error) {
-                        clearInterval(poll);
-                        genBtn.disabled = false;
+                    }
+                }, 2000);
+            }
+
+            async function saveAndShowQR() {
+                if (poll) clearInterval(poll);
+                const shopName = document.getElementById('shopName').value;
+                const address = document.getElementById('address').value;
+                const timing = document.getElementById('timing').value;
+                const services = document.getElementById('services').value;
+
+                const codeArea = document.getElementById('codeArea');
+                codeArea.innerHTML = '<div style="color:#38bdf8; font-size:12px; margin-top:8px;">Generating WhatsApp QR Code...</div>';
+
+                await fetch('/save-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone: '', shopName, address, timing, services, mode: 'qr' })
+                });
+
+                poll = setInterval(async () => {
+                    const res = await fetch('/status');
+                    const data = await res.json();
+                    if (data.qr) {
                         codeArea.innerHTML = \`
-                            <div class="error-card">
-                                <b>Error:</b> \${data.error}<br>
-                                <button class="btn-outline" style="margin-top:6px;" onclick="saveAndPair()">Try Again</button>
+                            <div class="code-card">
+                                <div style="font-size:11px; color:#cbd5e1;">Scan QR Code:</div>
+                                <img src="\${data.qr}" class="qr-image" />
+                                <small style="color:#94a3b8; font-size:10px;">WhatsApp > Linked Devices > Link a Device > Scan QR</small>
                             </div>\`;
+                    } else if (data.connected) {
+                        clearInterval(poll);
+                        codeArea.innerHTML = '<div style="color:#34d399; margin-top:8px; font-weight:bold;">✅ WhatsApp Connected!</div>';
                     }
                 }, 2000);
             }
@@ -459,17 +490,15 @@ app.post('/save-config', async (req, res) => {
     };
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(shopConfig, null, 2));
 
-    if (shopConfig.phone) {
-        if (botSocket) {
-            try { botSocket.ev.removeAllListeners(); botSocket.end(undefined); } catch(e){}
-            botSocket = null;
-        }
-        await delay(1200);
-        if (fs.existsSync('auth_session')) {
-            try { fs.rmSync('auth_session', { recursive: true, force: true }); } catch (e) {}
-        }
-        startBot(shopConfig.phone);
+    if (botSocket) {
+        try { botSocket.ev.removeAllListeners(); botSocket.end(undefined); } catch(e){}
+        botSocket = null;
     }
+    await delay(1200);
+    if (fs.existsSync('auth_session')) {
+        try { fs.rmSync('auth_session', { recursive: true, force: true }); } catch (e) {}
+    }
+    startBot(req.body.mode === 'code' ? shopConfig.phone : null);
     res.json({ success: true });
 });
 
@@ -480,6 +509,7 @@ app.get('/logout', (req, res) => {
 
 app.get('/status', (req, res) => res.json({ 
     code: currentCode, 
+    qr: currentQR,
     connected: isConnected,
     error: pairingError
 }));
